@@ -58,6 +58,79 @@ softmax_config_template = """
         net_args.push_back({{{{DNNL_ARG_SRC, {input_memory}}},
                 {{DNNL_ARG_DST, {output_memory}}}}});"""
 
+garnet_config_template = """
+        // Reorder encoder output
+        dnnl::memory::dims encoder_reoder_dims = {{1, {n_vertices}, {n_propagate}}};
+        auto encoder_reorder_mem_desc = dnnl::memory::desc(encoder_reoder_dims,
+                                                dnnl::memory::data_type::{data_type},
+                                                dnnl::memory::format_tag::acb}});
+        auto encoder_reorder_mem = dnnl::memory(encoder_reorder_mem_desc, eng);
+        
+        // -D^2
+        auto garnet_pow2_desc = dnnl::eltwise_forward::desc(
+                dnnl::prop_kind::forward_inference,
+                dnnl::algorithm::eltwise_pow, {distance_cal_mem_desc},
+                -1.0, 2.0);
+        
+        auto garnet_pow2_prim_desc = dnnl::eltwise_forward::primitive_desc(garnet_pow2_desc, eng);
+        
+        net.push_back(dnnl::eltwise_forward(garnet_pow2_prim_desc));
+        net_args.push_back({{{{DNNL_ARG_SRC, {distance_cal_mem}}},
+                {{DNNL_ARG_DST, {distance_cal_mem}}}}});
+        
+
+        // exp(-D^2)
+        auto garnet_exp_desc = dnnl::eltwise_forward::desc(
+                dnnl::prop_kind::forward_inference,
+                dnnl::algorithm::eltwise_exp, {distance_cal_mem_desc});
+        
+        auto garnet_exp_prim_desc = dnnl::eltwise_forward::primitive_desc(garnet_exp_desc, eng);
+        
+        net.push_back(dnnl::eltwise_forward(garnet_exp_prim_desc));
+        net_args.push_back({{{{DNNL_ARG_SRC, {distance_cal_mem}}},
+                {{DNNL_ARG_DST, {distance_cal_mem}}}}});
+
+
+        // aggregation
+        std::vector<float> aggregation_bias_data({n_propagate}, 0.0);
+        dnnl::memory::dims aggregation_bias_dims = {{1, 1, {n_propagate}}};
+        auto aggregation_bias_md = dnnl::memory::desc(aggregation_bias_dims, 
+                dnnl::memory::data_type::{data_type},
+                dnnl::memory::format_tag::{format_tag});
+        auto aggregation_bias_mem = dnnl::memory(aggregation_bias_md, eng);
+        write_to_dnnl_memory(aggregation_bias_data.data(), aggregation_bias_mem);
+
+        dnnl::memory::dims aggregation_output_dims = {{{batch_size}, {n_aggregators}, {n_propagate}}};
+        auto aggregation_output_md = dnnl::memory::desc(aggregation_output_dims, 
+                dnnl::memory::data_type::{data_type},
+                dnnl::memory::format_tag::{format_tag});
+        auto aggregation_output_mem = dnnl::memory(aggregation_output_md, eng);
+
+        auto aggregation_desc = dnnl::matmul::desc({distance_cal_mem_desc}, {encoder_mem_desc}, aggregation_bias_md, aggregation_output_md);
+        auto aggregation_primitive_desc = dnnl::matmul::primitive_desc(aggregation_desc, eng);
+
+        net.push_back(dnnl::matmul({aggregation_primitive_desc));
+        net_args.push_back({{{{DNNL_ARG_SRC, {distance_cal_mem}}},
+                {{DNNL_ARG_WEIGHTS, {encoder_mem}}},
+                {{DNNL_ARG_BIAS, aggregation_bias_mem}},
+                {{DNNL_ARG_DST, aggregation_output_mem}}}});
+
+        // aggregation 1/Vmax
+
+        auto aggregation_linear_desc = dnnl::eltwise_forward::desc(
+                dnnl::prop_kind::forward_inference,
+                dnnl::algorithm::eltwise_linear, aggregation_output_mem.get_desc(), {inv_Vmax}, 0.0);
+        
+        auto aggregation_linear_prim_desc = dnnl::eltwise_forward::primitive_desc(aggregation_linear_desc, eng);
+        
+        net.push_back(dnnl::eltwise_forward(aggregation_linear_prim_desc));
+        net_args.push_back({{{{DNNL_ARG_SRC, aggregation_output_mem}},
+                {{DNNL_ARG_DST, aggregation_output_mem}}}});
+
+        //Output transformation
+
+        
+        \n"""
 
 class OneAPI(Backend):
     def __init__(self):

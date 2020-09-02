@@ -483,6 +483,8 @@ class Input(Layer):
         return None
     
     def definition_dcpp(self):
+        if self.index != 1: # For now there is a support only for one input in oneAPI backend
+            return ""
         input_params = {}
         input_params["layer_name"] = "input"
         input_params["memory_object"] = "data"
@@ -1019,6 +1021,7 @@ class GarNet(Layer):
             pragma = ('partition', 'cyclic' , partition_factor)
 
         self.add_output_variable(shape, dims, pragma=pragma)
+        self.memory_descriptor = True
 
     def _initialize_transforms(self):
         n_propagate = self.attributes['n_propagate']
@@ -1177,6 +1180,40 @@ class GarNet(Layer):
             params[wname] = weights.name
             params['{}_t'.format(wname)] = weights.type.name
             params['{}_size'.format(wname)] = weights.data_length
+
+    def definition_dcpp(self):
+        """Returns oneAPI definition for GarNet Layer"""
+        def dense_layer_config(layer_name, output_dim):
+            dense_layer_template = self.model.config.backend.get_config_template('Dense')
+            params = {}
+            params["layer_name"] = layer_name
+            params["memory_object_type"] = "auto"
+            params["data_type"] = self.get_weights_precision()
+            params["output_dims"] = f"1, {self.attributes['n_vertices']}, {output_dim}"
+            if "input" in self.get_input_node().name:
+                params["input_desc"] = "input_data_md"
+                params["input_memory"] = "input_data_memory"
+            else:
+                input_layer = self.get_input_node_with_mem_desc(self)
+                params["input_desc"] = f"{input_layer.name}_memory.get_desc()"
+                params["input_memory"] = f"{input_layer.name}_memory"
+            layer_config = dense_layer_template.format(**params)
+
+            weight_params = self._default_weight_params()
+            weight_params["layer_name"] = layer_name
+            weight_config = self._memory_template.format(**weight_params)
+
+            bias_params = self._default_bias_params()
+            bias_params["layer_name"] = layer_name
+            bias_config = self._memory_template.format(**bias_params)
+
+            return weight_config + bias_config + layer_config
+
+        encoder_config = dense_layer_config("encoder", self.attributes['n_propagate'])
+        distance_calculator_config = dense_layer_config("distance_calc", self.attributes['n_aggregators'])
+        decoder_config = dense_layer_config("decoder", self.attributes['n_aggregators'])
+
+
 
 
 class GarNetStack(GarNet):
